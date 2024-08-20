@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: A-New-Startup - ECS - Sets up the CI/CD Pipeline for deploying to ECS via CloudFormation
+
+Parameters:
+
+  Prefix:
+    Type: String
+    Default: a-new-startup-ecs
+    Description: "A Prefix to use on the resource names."
+    
+Resources:
+  
+#  ___  __  ____  ____  ____  __  ____  ____  __    __  __ _  ____ 
+# / __)/  \(    \(  __)(  _ \(  )(  _ \(  __)(  )  (  )(  ( \(  __)
+#( (__(  O )) D ( ) _)  ) __/ )(  ) __/ ) _) / (_/\ )( /    / ) _) 
+# \___)\__/(____/(____)(__)  (__)(__)  (____)\____/(__)\_)__)(____) 
+# 
+#
+
+  # This simple pipeline uses CloudFormation to deploy to ECS.
+  AppPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: !Join [ '-', [!Ref Prefix, "containerized"]]
+      ArtifactStore:
+        Type: S3
+        Location: !ImportValue
+          Fn::Join: [ '-', [!Ref Prefix, "ArtifactStoreBucket"]]
+      RoleArn: !ImportValue
+        Fn::Join: [ '-', [!Ref Prefix, "CodePipelineServiceRole"]]
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Application-Code
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                BranchName: "main"
+                RepositoryName:
+                  Fn::ImportValue:
+                    !Join ["-", [ !Ref Prefix, "AppRepo"]]
+                PollForSourceChanges: false
+              RunOrder: 1
+              
+        - Name: Build
+          Actions:
+            - Name: Build-App-Container-Image
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                # Need to include the .json files we create as part of the build process
+                - Name: BuildArtifact
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !ImportValue 
+                  Fn::Join: [ '-', [!Ref Prefix, "BuildProject"]]
+              RunOrder: 1
+              
+        - Name: Deploy-Backend
+          Actions:
+            - Name: Deploy-Backend
+              InputArtifacts:
+                # need to pass backend.yaml through from the source to the deploy stage.
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                RoleArn: !ImportValue 
+                  Fn::Join: [ '-', [!Ref Prefix, "CFNDeployRole"]]
+                # We're updating an existing stack.
+                StackName: !Join [ "-", [ !Ref Prefix, "backend"]]
+                # THIS IS COMING FROM THE APP SOURCE CODE
+                # This is the template that creates the dynamically named DDB table, SNS Topic, and SQS queue.
+                TemplatePath: "SourceOutput::template.yaml"
+                # We're changing a parameter of the template - to ensure unique resource names.
+                # See here: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-action-reference.html
+                ParameterOverrides: '{"Prefix":"a-new-startup-ecs","Environment":"dev"}'
+
+        - Name: Deploy
+          Actions:
+            - Name: Deploy-To-ECS
+              InputArtifacts:
+                - Name: BuildArtifact
+                # need to pass ecs-service.yaml through from the app source to the deploy stage.
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                RoleArn: !ImportValue a-new-startup-ecs-CFNDeployRole
+                # We're updating an existing stack.
+                StackName: "a-new-startup-ecs-service"
+                TemplatePath: "SourceOutput::ecs-service.yaml"
+                TemplateConfiguration: "BuildArtifact::stackparams.json"
+
